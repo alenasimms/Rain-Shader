@@ -1,0 +1,301 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Babylon.js Rain Shader</title>
+  <style>
+    html, body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+    }
+    #renderCanvas {
+      width: 100%;
+      height: 100%;
+      touch-action: none;
+      display: block;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="renderCanvas"></canvas>
+
+  <script src="https://cdn.babylonjs.com/babylon.js"></script>
+
+  <script>
+    const canvas = document.getElementById("renderCanvas");
+    const engine = new BABYLON.Engine(canvas, true);
+
+    const createScene = function () {
+      const scene = new BABYLON.Scene(engine);
+
+      scene.environmentTexture =
+        BABYLON.CubeTexture.CreateFromPrefilteredData(
+          "https://playground.babylonjs.com/textures/environment.env",
+          scene
+        );
+      scene.createDefaultSkybox(scene.environmentTexture, true, 1000);
+
+      function makeRainMesh(name, scene, dropCount) //mesh to hold raindrop geometry
+{
+   const rain = new BABYLON.Mesh(name, scene);
+
+   const positions = [];
+   const indices = [];
+   const uvs = [];
+
+   function rand(min, max) //helper for scattering droplets
+   {
+       return min + Math.random() * (max - min);
+   }
+
+    //raindrop dimensions
+   const width = 0.01;
+   const height = 0.5;
+
+   for (let i = 0; i < dropCount; i++)
+   {
+       const baseX = rand(-10.0, 10.0); //random X pos
+       const baseY = rand(0.0, 10.0); //random Y start
+       const baseZ = rand(-10.0, 10.0); //random Z pos
+
+       const tiltX = 0.04; //wind slant
+
+       const vIndex = positions.length / 3; //first vertex of drop
+
+        //one triangle per drop
+       positions.push((baseX - width), baseY, baseZ); //bottom left
+       uvs.push(0.0, 0.0);
+       positions.push((baseX + width), baseY, baseZ); //bottom right
+       uvs.push(1.0, 0.0);
+       positions.push(baseX - tiltX, (baseY + height),baseZ); //top
+       uvs.push(0.5, 1.0);
+
+       indices.push(vIndex, (vIndex + 1), (vIndex + 2)); //connect vertices
+   }
+
+   const vertexData = new BABYLON.VertexData();
+   vertexData.positions = positions;
+   vertexData.indices = indices;
+   vertexData.uvs = uvs;
+
+    //per-vertex normals for lighting
+   const normals = [];
+   BABYLON.VertexData.ComputeNormals(positions, indices, normals);
+   vertexData.normals = normals;
+
+   vertexData.applyToMesh(rain);
+
+   return rain;
+}
+
+
+var createScene = function () {
+   // Scene, Camera and Light setup
+   const scene = new BABYLON.Scene(engine);
+   //const camera = new BABYLON.ArcRotateCamera("Camera", -Math.PI/2, 1, 10, new BABYLON.Vector3(0, 0, 0), scene);
+   var camera = new BABYLON.ArcRotateCamera("Camera", -Math.PI / 2,  Math.PI / 2, 5, BABYLON.Vector3.Zero(), scene);
+
+   camera.attachControl(canvas, true);
+
+   const lightDirection = new BABYLON.Vector3(-0.5, -1.0, 0.7);
+   const light = new BABYLON.DirectionalLight("DirectionalLight", lightDirection, scene);
+   light.intensity = 1.0;
+
+   var reflectionTexture = new BABYLON.CubeTexture("textures/skybox", scene);
+
+    //skybox set-up
+   var skybox = BABYLON.MeshBuilder.CreateBox("skybox", {
+       size: 10,
+       sideOrientation: BABYLON.Mesh.BACKSIDE
+   }, scene);
+   var skyboxMaterial = new BABYLON.StandardMaterial('skyboxMat', scene);
+   skyboxMaterial.reflectionTexture = new BABYLON.CubeTexture('textures/skybox', scene);
+   skyboxMaterial.reflectionTexture.coordinatesMode = BABYLON.Texture.SKYBOX_MODE;
+   skyboxMaterial.diffuseColor = new BABYLON.Color3(0, 0, 0);
+   skybox.material = skyboxMaterial;
+   skybox.material.disableDepthWrite = true;
+
+    //reflective ground set-up
+   var ground = BABYLON.MeshBuilder.CreateGround("ground", {width: 20, height: 20}, scene);
+   var groundMat = new BABYLON.StandardMaterial('groundMat', scene);
+   groundMat.reflectionTexture = reflectionTexture;
+   groundMat.diffuseColor = new BABYLON.Color3(0.05, 0.05, 0.08);
+   groundMat.reflectionTexture.level = 0.9;
+   ground.material = groundMat;
+   ground.position.y = -1;
+
+   const rainMesh = makeRainMesh("rain", scene, 1400);
+
+   var rainVertexShader =
+   `
+       attribute vec3 position;
+       attribute vec3 normal;
+       attribute vec2 uv;
+
+       uniform mat4 world;
+       uniform mat4 view;
+       uniform mat4 projection;
+       uniform mat3 inverseTranspose;
+
+       uniform float time;
+       uniform float windStrength;
+       uniform float fallSpeed;
+
+       varying vec2 vUV;
+       varying vec3 worldNormal;
+       varying vec3 worldPos;
+
+       void main()
+       {
+            //falling rain loop
+           vec3 pos = position;
+           float speed = fallSpeed;
+           float range = 10.0;
+           float fallen = mod(pos.y - speed * time, range); //wrap falling pos into 0-10 range 
+           if (fallen < 0.0) fallen += range; //no negative results
+           pos.y = fallen - 1.0; //offset so drops vanish below ground
+
+            //wind drift based on fall distance, further down = more drift
+           float windOffset = (fallen / range) * windStrength;
+           pos.x -= windOffset; //apply offset
+
+           vUV = uv;
+
+           vec4 localPos = vec4(pos, 1.0);
+           vec4 worldPosition = world * localPos; 
+           vec4 viewPosition = view * worldPosition; 
+           vec4 clipPos = projection * viewPosition; 
+
+           worldNormal = inverseTranspose * normal;
+           worldPos = worldPosition.xyz;
+
+           gl_Position = clipPos; 
+       }
+   `;
+
+   var rainFragmentShader =
+   `
+       precision highp float;
+
+       uniform vec3 surfaceColor;
+       uniform vec3 lightDirection;
+       uniform float lightIntensity;
+       uniform float ambientIntensity;
+       uniform vec3 viewPos;
+       uniform float shine;
+       uniform float specStrength;
+
+       varying vec2 vUV;
+       varying vec3 worldNormal;
+       varying vec3 worldPos;
+
+       void main()
+       {
+            //droplet shaping
+            //https://thebookofshaders.com/05/ 
+           float dist = abs(vUV.x - 0.5); //dist from vertical center of drop
+           float horiz = smoothstep(0.5, 0.2, dist); //1.0 in center -> 0.0 at edges, rounded sides
+           float y = vUV.y;
+           float vert = smoothstep(0.0, 0.2, y); //fade bottom 20% 
+           float shape = horiz * vert; //create droplet shape
+           float alpha = shape; 
+
+           if (alpha < 0.02) //don't draw if already pretty much transparent
+           {
+               discard;
+           }
+
+            //raindrop color
+           vec3 baseColor = vec3(0.75, 0.85, 1.0);
+           vec3 surfColor = baseColor * surfaceColor; 
+
+           vec3 normalizedLightDirection = normalize(lightDirection);
+           vec3 normalizedNormal = normalize(worldNormal);
+
+           float diffuse = max(0.0, dot(normalizedNormal, -normalizedLightDirection));
+           vec3 ambient = ambientIntensity * surfColor;
+
+           vec3 v = normalize(viewPos - worldPos);       
+           vec3 l = normalize(-normalizedLightDirection);          
+           vec3 h = normalize(v+l);        
+
+           float ndoth = max(dot(normalizedNormal, h), 0.0);         
+           float specAllowed = diffuse > 0.0 ? 1.0 : 0.0;        
+           float highlight = pow(ndoth, shine);          
+           float specFactor = specAllowed * highlight;         
+           vec3 specular = lightIntensity * specStrength * specFactor * vec3(1.0);        
+
+           vec3 pixelColor = specular + ambient + (lightIntensity * diffuse * surfColor);
+
+           gl_FragColor = vec4(pixelColor, alpha);
+       }
+   `;
+
+
+   var rainMaterial = new BABYLON.ShaderMaterial(
+       "rainMat",
+       scene,
+       { vertexSource: rainVertexShader, fragmentSource: rainFragmentShader},
+       {
+           attributes: ["position", "normal", "uv"],
+           uniforms: [
+               "world", "view", "projection",
+               "inverseTranspose", "time", "windStrength",
+               "fallSpeed", "surfaceColor", "lightDirection",
+               "lightIntensity", "ambientIntensity", "viewPos",
+               "shine", "specStrength"
+           ],
+       }
+   );
+
+   rainMaterial.setFloat("windStrength", 2.0);
+   rainMaterial.setFloat("fallSpeed", 9.0);
+
+   rainMaterial.setVector3("surfaceColor", new BABYLON.Vector3(1.0, 1.0, 1.0));
+   rainMaterial.setVector3("lightDirection", light.direction);
+   rainMaterial.setFloat("lightIntensity", light.intensity);
+   rainMaterial.setFloat("ambientIntensity", 0.4);
+   rainMaterial.setFloat("shine", 50.0);
+   rainMaterial.setFloat("specStrength", 0.8);
+
+   rainMesh.material = rainMaterial;
+
+   scene.registerBeforeRender(function () {
+       var t = performance.now() / 1000.0;
+       rainMaterial.setFloat("time", t);
+
+       let world4x4 = rainMesh.getWorldMatrix();
+       let normalMatrix4x4 = new BABYLON.Matrix();
+       world4x4.toNormalMatrix(normalMatrix4x4);
+       let inverseTranspose3x3 = BABYLON.Matrix.GetAsMatrix3x3(normalMatrix4x4);
+       rainMaterial.setMatrix3x3("inverseTranspose", inverseTranspose3x3);
+       rainMaterial.setVector3("viewPos", camera.position);
+   });
+
+   scene.registerBeforeRender(function() {
+       skybox.position = camera.position;
+   })
+
+   return scene;
+};
+
+
+export default createScene
+
+      return scene;
+    };
+
+    const scene = createScene();
+
+    engine.runRenderLoop(() => {
+      scene.render();
+    });
+
+    window.addEventListener("resize", () => {
+      engine.resize();
+    });
+  </script>
+</body>
+</html>
